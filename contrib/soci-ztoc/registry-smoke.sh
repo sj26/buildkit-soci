@@ -23,7 +23,6 @@ docker buildx build --builder "$builder" --progress=rawjson --provenance=false \
   "$work" 2>&1 | tee "$work/push.log"
 
 python3 - "$address" "$work/push.log" <<'PY'
-from datetime import datetime
 import hashlib
 import json
 import sys
@@ -55,8 +54,12 @@ for line in open(log):
     for status in json.loads(line).get('statuses', []):
         if 'completed' in status:
             statuses[status['id']] = status
+def timestamp(value):
+    assert value.endswith('Z'), value
+    seconds, _, fraction = value[:-1].partition('.')
+    return seconds, fraction.ljust(9, '0')
 def interval(status):
-    return [datetime.fromisoformat(status[k].replace('Z', '+00:00')) for k in ('started', 'completed')]
+    return [timestamp(status[k]) for k in ('started', 'completed')]
 overlap = False
 for name, status in statuses.items():
     if name.startswith('indexing SOCI layer '):
