@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"strconv"
 	"sync"
 
 	"github.com/containerd/containerd/v2/core/content"
@@ -17,9 +18,9 @@ import (
 	"github.com/pkg/errors"
 )
 
-// newStream starts indexing as gzip emits bytes. The pipe applies backpressure;
-// the same two-slot budget covers both streaming and existing-blob indexing.
-func (s *sociIndexer) newStream(ctx context.Context) (io.WriteCloser, compression.Finalizer, error) {
+// newStream compresses tar and creates checkpoints in the same helper. The pipe
+// applies backpressure; the two-slot budget also covers existing-blob indexing.
+func (s *sociIndexer) newStream(ctx context.Context, dest io.Writer, level int) (io.WriteCloser, compression.Finalizer, error) {
 	if err := sociSlots.Acquire(ctx, 1); err != nil {
 		return nil, nil, err
 	}
@@ -30,27 +31,26 @@ func (s *sociIndexer) newStream(ctx context.Context) (io.WriteCloser, compressio
 	}
 	// Only the open descriptor is needed, including if the solve is canceled.
 	os.Remove(output.Name())
-	reader, writer, err := os.Pipe()
+	cmd := exec.CommandContext(ctx, s.helper, "--compress", strconv.Itoa(level))
+	writer, err := cmd.StdinPipe()
 	if err != nil {
 		output.Close()
 		sociSlots.Release(1)
 		return nil, nil, err
 	}
-	cmd := exec.CommandContext(ctx, s.helper, "-")
-	cmd.Stdin, cmd.Stdout = reader, output
+	hash := digest.Canonical.Digester()
+	var size iohelper.Counter
+	cmd.Stdout = io.MultiWriter(dest, hash.Hash(), &size)
+	cmd.ExtraFiles = []*os.File{output}
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Start(); err != nil {
-		reader.Close()
 		writer.Close()
 		output.Close()
 		sociSlots.Release(1)
 		return nil, nil, err
 	}
-	reader.Close()
 	done := progress.OneOff(ctx, "streaming SOCI index")
-	hash := digest.Canonical.Digester()
-	var size iohelper.Counter
 	var layer, ztoc ocispecs.Descriptor
 	closeStream := sync.OnceValue(func() (retErr error) {
 		defer sociSlots.Release(1)
@@ -68,7 +68,7 @@ func (s *sociIndexer) newStream(ctx context.Context) (io.WriteCloser, compressio
 		ztoc, err = s.writeZtoc(ctx, layer, output)
 		return err
 	})
-	return &sociStreamWriter{Writer: io.MultiWriter(writer, hash.Hash(), &size), close: closeStream},
+	return &sociStreamWriter{Writer: writer, close: closeStream},
 		func(ctx context.Context, store content.Store) (map[string]string, error) {
 			if err := closeStream(); err != nil {
 				return nil, err

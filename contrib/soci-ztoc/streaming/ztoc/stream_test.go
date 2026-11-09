@@ -12,6 +12,9 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/awslabs/soci-snapshotter/ztoc/compression"
+	"github.com/opencontainers/go-digest"
 )
 
 type fragmentedReader struct{ io.Reader }
@@ -96,5 +99,67 @@ func TestStreamingZtocCompatibility(t *testing.T) {
 				t.Fatal("accepted bad gzip checksum")
 			}
 		})
+	}
+}
+
+func TestCompressedZtocExtraction(t *testing.T) {
+	var archive bytes.Buffer
+	tw := tar.NewWriter(&archive)
+	random := make([]byte, 70031)
+	rand.New(rand.NewSource(27)).Read(random)
+	files := [][]byte{random, bytes.Repeat([]byte("dictionary-dependent"), 9001), nil}
+	for i, data := range files {
+		if err := tw.WriteHeader(&tar.Header{Name: fmt.Sprintf("file-%d", i), Size: int64(len(data)), Mode: 0644, Format: tar.FormatPAX, PAXRecords: map[string]string{"SCHILY.xattr.user.example": "value"}}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tw.Write(data); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	for _, level := range []int{1, 3, 9} {
+		t.Run(fmt.Sprint(level), func(t *testing.T) {
+			var compressed bytes.Buffer
+			got, err := NewBuilder("compression-test").CompressZtoc(fragmentedReader{bytes.NewReader(archive.Bytes())}, &compressed, 32768, level)
+			if err != nil {
+				t.Fatal(err)
+			}
+			reader, err := gzip.NewReader(bytes.NewReader(compressed.Bytes()))
+			if err != nil {
+				t.Fatal(err)
+			}
+			plain, err := io.ReadAll(reader)
+			reader.Close()
+			if err != nil || !bytes.Equal(plain, archive.Bytes()) {
+				t.Fatalf("gzip round trip: %v", err)
+			}
+			if got.MaxSpanID < 3 {
+				t.Fatal("fixture did not cross enough spans")
+			}
+			// Exercise the stock SOCI reader against compressor-created checkpoints.
+			info, err := got.Zinfo()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer info.Close()
+			for span := range got.SpanDigests {
+				start := info.StartCompressedOffset(compression.SpanID(span))
+				end := info.EndCompressedOffset(compression.SpanID(span), got.CompressedArchiveSize)
+				if digest.FromBytes(compressed.Bytes()[start:end]) != got.SpanDigests[span] {
+					t.Fatalf("span %d checksum mismatch", span)
+				}
+			}
+			for i, want := range files {
+				data, err := got.ExtractFile(io.NewSectionReader(bytes.NewReader(compressed.Bytes()), 0, int64(compressed.Len())), fmt.Sprintf("file-%d", i))
+				if err != nil || !bytes.Equal(data, want) {
+					t.Fatalf("file %d extraction: %v", i, err)
+				}
+			}
+		})
+	}
+	if _, err := NewBuilder("test").CompressZtoc(bytes.NewReader([]byte("not tar")), io.Discard, 32768, 3); err == nil {
+		t.Fatal("accepted invalid tar")
 	}
 }

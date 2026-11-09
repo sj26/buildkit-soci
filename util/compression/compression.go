@@ -57,8 +57,8 @@ type Config struct {
 	Type  Type
 	Force bool
 	Level *int
-	// OnCompressed consumes the exact gzip output concurrently with compression.
-	OnCompressed func(context.Context) (io.WriteCloser, Finalizer, error)
+	// GzipCompressor can emit both compressed bytes and associated metadata.
+	GzipCompressor func(context.Context, io.Writer, int) (io.WriteCloser, Finalizer, error)
 }
 
 func New(t Type) Config {

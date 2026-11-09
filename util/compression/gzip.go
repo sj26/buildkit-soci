@@ -7,25 +7,20 @@ import (
 
 	"github.com/containerd/containerd/v2/core/content"
 	"github.com/containerd/containerd/v2/core/images"
-	"github.com/moby/buildkit/util/iohelper"
 	ocispecs "github.com/opencontainers/image-spec/specs-go/v1"
 )
 
 func (c gzipType) Compress(ctx context.Context, comp Config) (compressorFunc Compressor, finalize Finalizer) {
-	if comp.OnCompressed != nil {
+	if comp.GzipCompressor != nil {
 		var finish Finalizer
 		return func(dest io.Writer, _ string) (io.WriteCloser, error) {
-				sink, f, err := comp.OnCompressed(ctx)
-				if err != nil {
-					return nil, err
+				level := gzip.DefaultCompression
+				if comp.Level != nil {
+					level = *comp.Level
 				}
+				w, f, err := comp.GzipCompressor(ctx, dest, level)
 				finish = f
-				w, err := gzipWriter(comp)(io.MultiWriter(dest, sink))
-				if err != nil {
-					sink.Close()
-					return nil, err
-				}
-				return &iohelper.WriteCloser{WriteCloser: w, CloseFunc: sink.Close}, nil
+				return w, err
 			}, func(ctx context.Context, cs content.Store) (map[string]string, error) {
 				return finish(ctx, cs)
 			}
@@ -59,7 +54,7 @@ func (c gzipType) NeedsConversion(ctx context.Context, cs content.Store, desc oc
 
 func (c gzipType) NeedsComputeDiffBySelf(comp Config) bool {
 	// we allow compressing it with a customized compression level that containerd differ doesn't support so we compress it by self.
-	return comp.Level != nil || comp.OnCompressed != nil
+	return comp.Level != nil || comp.GzipCompressor != nil
 }
 
 func (c gzipType) OnlySupportOCITypes() bool {

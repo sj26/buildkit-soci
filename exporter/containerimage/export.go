@@ -232,7 +232,7 @@ func (e *imageExporterInstance) Prepare(ctx context.Context, sessionID string) (
 	}
 	cfg := e.opts.RefCfg
 	cfg.OnBlobReady = e.opts.soci.indexLayer
-	cfg.Compression.OnCompressed = e.opts.soci.newStream
+	cfg.Compression.GzipCompressor = e.opts.soci.newStream
 	return func(ctx context.Context, ref cache.ImmutableRef) error {
 		_, err := ref.GetRemotes(ctx, true, cfg, false, session.NewGroup(sessionID))
 		return err

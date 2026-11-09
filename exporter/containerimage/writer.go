@@ -101,7 +101,7 @@ func (ic *ImageWriter) Commit(ctx context.Context, inp *exporter.Source, session
 			}
 		}
 		opts.RefCfg.OnBlobReady = opts.soci.indexLayer
-		opts.RefCfg.Compression.OnCompressed = opts.soci.newStream
+		opts.RefCfg.Compression.GzipCompressor = opts.soci.newStream
 		defer func() {
 			if retErr == nil {
 				resultDesc, retErr = opts.soci.wrap(ctx, resultDesc)
