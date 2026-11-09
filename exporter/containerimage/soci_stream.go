@@ -10,9 +10,11 @@ import (
 	"sync"
 
 	"github.com/containerd/containerd/v2/core/content"
+	"github.com/moby/buildkit/util/bklog"
 	"github.com/moby/buildkit/util/compression"
 	"github.com/moby/buildkit/util/iohelper"
 	"github.com/moby/buildkit/util/progress"
+	"github.com/moby/buildkit/util/push"
 	digest "github.com/opencontainers/go-digest"
 	ocispecs "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/pkg/errors"
@@ -40,11 +42,24 @@ func (s *sociIndexer) newStream(ctx context.Context, dest io.Writer, level int) 
 	}
 	hash := digest.Canonical.Digester()
 	var size iohelper.Counter
-	cmd.Stdout = io.MultiWriter(dest, hash.Hash(), &size)
+	writers := []io.Writer{dest, hash.Hash(), &size}
+	var uploads []*push.StreamUpload
+	for _, p := range s.pushers {
+		upload := p.Start(ctx)
+		uploads = append(uploads, upload)
+		writers = append(writers, upload)
+	}
+	closeUploads := func() {
+		for _, upload := range uploads {
+			upload.Close()
+		}
+	}
+	cmd.Stdout = io.MultiWriter(writers...)
 	cmd.ExtraFiles = []*os.File{output}
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Start(); err != nil {
+		closeUploads()
 		writer.Close()
 		output.Close()
 		sociSlots.Release(1)
@@ -55,12 +70,18 @@ func (s *sociIndexer) newStream(ctx context.Context, dest io.Writer, level int) 
 	closeStream := sync.OnceValue(func() (retErr error) {
 		defer sociSlots.Release(1)
 		defer output.Close()
+		defer closeUploads()
 		defer func() { done(retErr) }()
 		writer.Close()
 		if err := cmd.Wait(); err != nil {
 			return errors.Wrapf(err, "SOCI indexer: %s", stderr.String())
 		}
 		layer = ocispecs.Descriptor{Digest: hash.Digest(), Size: size.Size(), MediaType: ocispecs.MediaTypeImageLayerGzip}
+		for _, upload := range uploads {
+			if err := upload.Commit(layer); err != nil {
+				bklog.G(ctx).WithError(err).Warn("stream upload failed; using finalized blob push")
+			}
+		}
 		if layer.Size < sociMinLayerSize {
 			return nil
 		}

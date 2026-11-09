@@ -46,9 +46,15 @@ func Pusher(ctx context.Context, resolver remotes.Resolver, ref string) (remotes
 	return &pusher{Pusher: p}, nil
 }
 
+type BlobPusher struct {
+	Push     func(context.Context, ocispecs.Descriptor, content.Provider) error
+	resolver *resolver.Resolver
+	ref      reference.Named
+}
+
 // NewBlobPusher uploads ready content without publishing manifests or tags.
 // The normal Push path still verifies the complete graph and publishes it last.
-func NewBlobPusher(ctx context.Context, sm *session.Manager, sid, ref string, insecure bool, hosts docker.RegistryHosts) (func(context.Context, ocispecs.Descriptor, content.Provider) error, error) {
+func NewBlobPusher(ctx context.Context, sm *session.Manager, sid, ref string, insecure bool, hosts docker.RegistryHosts) (*BlobPusher, error) {
 	parsed, err := reference.ParseNormalizedNamed(ref)
 	if err != nil {
 		return nil, err
@@ -66,7 +72,7 @@ func NewBlobPusher(ctx context.Context, sm *session.Manager, sid, ref string, in
 		return nil, err
 	}
 	var uploads flightcontrol.CachedGroup[struct{}]
-	return func(ctx context.Context, desc ocispecs.Descriptor, provider content.Provider) error {
+	return &BlobPusher{resolver: r, ref: parsed, Push: func(ctx context.Context, desc ocispecs.Descriptor, provider content.Provider) error {
 		if images.IsNonDistributable(desc.MediaType) {
 			return nil
 		}
@@ -78,7 +84,7 @@ func NewBlobPusher(ctx context.Context, sm *session.Manager, sid, ref string, in
 			return struct{}{}, err
 		})
 		return err
-	}, nil
+	}}, nil
 }
 
 func Push(ctx context.Context, sm *session.Manager, sid string, provider content.Provider, manager content.Manager, dgst digest.Digest, ref string, insecure bool, hosts docker.RegistryHosts, byDigest bool, annotations map[digest.Digest]map[string]string) error {

@@ -18,6 +18,7 @@ import (
 	"github.com/moby/buildkit/util/flightcontrol"
 	"github.com/moby/buildkit/util/progress"
 	"github.com/moby/buildkit/util/progress/logs"
+	"github.com/moby/buildkit/util/push"
 	digest "github.com/opencontainers/go-digest"
 	"github.com/opencontainers/image-spec/specs-go"
 	ocispecs "github.com/opencontainers/image-spec/specs-go/v1"
@@ -44,6 +45,7 @@ type sociIndexer struct {
 	layers         flightcontrol.CachedGroup[ocispecs.Descriptor]
 	manifests      map[digest.Digest]ocispecs.Descriptor
 	push           func(context.Context, ocispecs.Descriptor, content.Provider) error
+	pushers        []*push.BlobPusher
 	remote         map[digest.Digest]ocispecs.Descriptor
 	remoteProvider content.Provider
 }

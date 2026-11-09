@@ -46,6 +46,14 @@ DOCKERFILE
 docker buildx build --builder "$builder" --progress=rawjson --provenance=false \
   --output "type=registry,name=$address/test:early,registry.insecure=true,oci-mediatypes=true,compression=gzip,force-compression=true,soci=true" \
   "$work" 2>&1 | tee "$work/early.log"
+# New gzip layers must reach the registry in chunks, not silently fall back.
+docker logs "$registry" > "$work/chunk-uploads.log" 2>&1
+grep -q 'http.request.method=PATCH' "$work/chunk-uploads.log"
+docker logs "buildx_buildkit_${builder}0" > "$work/daemon.log" 2>&1
+if grep -q 'stream upload failed' "$work/daemon.log"; then
+  cat "$work/daemon.log" >&2
+  exit 1
+fi
 # The ordinary exporter must retain exactly the same image graph.
 docker buildx build --builder "$builder" --progress=plain --provenance=false \
   --output "type=registry,name=$address/test:ordinary,registry.insecure=true,oci-mediatypes=true,compression=gzip,force-compression=true" \

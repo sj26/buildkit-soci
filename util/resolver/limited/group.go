@@ -78,6 +78,12 @@ func (g *Group) Size() int64 {
 	return g.size
 }
 
+// Acquire shares the registry budget with uploads that start before a blob's
+// digest is known. The caller releases it after its request completes.
+func (g *Group) Acquire(ctx context.Context, ref string, desc ocispecs.Descriptor) (context.Context, func(), error) {
+	return g.req(ref).acquire(ctx, desc)
+}
+
 func (g *Group) req(ref string) *req {
 	return &req{g: g, ref: domain(ref)}
 }

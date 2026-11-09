@@ -253,7 +253,7 @@ func (e *imageExporterInstance) prepareSOCI(ctx context.Context, opts *ImageComm
 		}
 	}
 	if e.push {
-		var pushers []func(context.Context, ocispecs.Descriptor, content.Provider) error
+		var pushers []*push.BlobPusher
 		for name := range strings.SplitSeq(opts.ImageName, ",") {
 			if name == "" {
 				continue
@@ -266,12 +266,13 @@ func (e *imageExporterInstance) prepareSOCI(ctx context.Context, opts *ImageComm
 		}
 		indexer.push = func(ctx context.Context, desc ocispecs.Descriptor, provider content.Provider) error {
 			for _, p := range pushers {
-				if err := p(ctx, desc, provider); err != nil {
+				if err := p.Push(ctx, desc, provider); err != nil {
 					return err
 				}
 			}
 			return nil
 		}
+		indexer.pushers = pushers
 	}
 	opts.soci = indexer
 	return nil
