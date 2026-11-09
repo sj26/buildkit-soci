@@ -30,7 +30,11 @@ if grep -q 'indexing SOCI layer' "$work/warm.log"; then
 fi
 printf 'changed\n' >> "$work/second"
 build changed true
-grep -q 'indexing SOCI layer' "$work/changed.log"
+grep -q 'streaming SOCI index' "$work/changed.log"
+if grep -q 'indexing SOCI layer' "$work/changed.log"; then
+  echo 'New gzip blob was reindexed after streaming' >&2
+  exit 1
+fi
 grep -q 'reusing SOCI ztoc' "$work/changed.log"
 
 python3 - "$work" <<'PY'

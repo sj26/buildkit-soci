@@ -18,6 +18,9 @@ docker buildx create --name "$builder" --driver docker-container --driver-opt ne
 dd if=/dev/urandom of="$work/first" bs=1M count=12 status=none
 dd if=/dev/urandom of="$work/second" bs=1M count=13 status=none
 printf 'FROM scratch\nCOPY first /first\nCOPY second /second\n' > "$work/Dockerfile"
+# Prime gzip blobs, but no zTOCs, to exercise existing-blob indexing/upload overlap.
+docker buildx build --builder "$builder" --provenance=false \
+  --output 'type=oci,dest=-,compression=gzip,force-compression=true' "$work" > /dev/null
 docker buildx build --builder "$builder" --progress=rawjson --provenance=false \
   --output "type=registry,name=$address/test:ok,registry.insecure=true,oci-mediatypes=true,compression=gzip,force-compression=true,soci=true" \
   "$work" 2>&1 | tee "$work/push.log"
@@ -79,7 +82,7 @@ if docker buildx build --builder "$builder" --provenance=false \
   echo 'Failed indexer unexpectedly succeeded' >&2
   exit 1
 fi
-grep -q 'exit status 73' "$work/failed.log"
+grep -q 'exit status 73' "$work/failed.log" || { cat "$work/failed.log" >&2; exit 1; }
 test "$(curl --silent -o /dev/null -w '%{http_code}' "http://$address/v2/test/manifests/failed")" = 404
 echo 'PASS: failed export does not publish a tag'
 
@@ -123,6 +126,6 @@ if docker buildx build --builder "$builder" --provenance=false \
   "$work" > "$work/changed.log" 2>&1; then
   echo 'New layer incorrectly reused a cached index' >&2; exit 1
 fi
-grep -q 'exit status 73' "$work/changed.log"
+grep -q 'exit status 73' "$work/changed.log" || { cat "$work/changed.log" >&2; exit 1; }
 test "$(curl --silent -o /dev/null -w '%{http_code}' "http://$address/v2/test/manifests/changed")" = 404
 echo 'PASS: a changed layer is not accepted as a remote cache hit'

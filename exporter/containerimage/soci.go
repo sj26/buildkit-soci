@@ -150,25 +150,11 @@ func (s *sociIndexer) layer(ctx context.Context, layer ocispecs.Descriptor, prov
 		if err := cmd.Run(); err != nil {
 			return out, errors.Wrapf(err, "SOCI indexer: %s", stderr.String())
 		}
-		if _, err := output.Seek(0, io.SeekStart); err != nil {
-			return out, err
-		}
-		dgst, err := digest.FromReader(output)
+		out, err = s.writeZtoc(ctx, layer, output)
 		if err != nil {
 			return out, err
 		}
-		size, err := output.Seek(0, io.SeekCurrent)
-		if err != nil {
-			return out, err
-		}
-		if _, err := output.Seek(0, io.SeekStart); err != nil {
-			return out, err
-		}
-		out = sociLayerDescriptor(layer, dgst, size)
-		if err := content.WriteBlob(ctx, s.store, dgst.String(), output, out); err != nil {
-			return out, err
-		}
-		_, err = s.store.Update(ctx, content.Info{Digest: layer.Digest, Labels: map[string]string{sociCacheLabel: dgst.String()}}, "labels."+sociCacheLabel)
+		_, err = s.store.Update(ctx, content.Info{Digest: layer.Digest, Labels: map[string]string{sociCacheLabel: out.Digest.String()}}, "labels."+sociCacheLabel)
 		return out, err
 	})
 }

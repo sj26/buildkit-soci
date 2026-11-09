@@ -10,8 +10,10 @@ RUN apk add --no-cache git build-base zlib-dev zlib-static
 RUN git clone --depth=1 --branch=v0.16.1 https://github.com/awslabs/soci-snapshotter.git /soci
 WORKDIR /soci
 COPY contrib/soci-ztoc/main.go ./buildkit-soci-ztoc/main.go
+COPY contrib/soci-ztoc/streaming/ztoc/ ./ztoc/
 RUN --mount=type=cache,target=/root/.cache/go-build \
     --mount=type=cache,target=/go/pkg/mod \
+    CGO_ENABLED=1 go test -mod=mod -tags socihelper ./ztoc -run TestStreamingZtocCompatibility && \
     CGO_ENABLED=1 go build -mod=mod -tags socihelper,netgo,osusergo -ldflags '-extldflags=-static' -o /out/buildkit-soci-ztoc ./buildkit-soci-ztoc
 
 FROM moby/buildkit:v0.34.2
