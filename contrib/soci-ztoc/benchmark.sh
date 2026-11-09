@@ -41,7 +41,11 @@ for sample in 0 1 2; do
     name="$sample-$variant"
     docker run -d --name "$registry" -p 127.0.0.1::5000 "${REGISTRY_IMAGE:-registry:2}" >/dev/null
     address=$(docker port "$registry" 5000/tcp)
-    curl --fail --silent --retry 10 --retry-connrefused --retry-delay 1 "http://$address/v2/" >/dev/null
+    curl --fail --silent --show-error --retry 10 --retry-all-errors --retry-delay 1 --max-time 2 "http://$address/v2/" >/dev/null || {
+      status=$?
+      docker logs "$registry" >&2
+      exit "$status"
+    }
     docker buildx create --name "$builder" --driver docker-container --driver-opt network=host --driver-opt "image=$image" --bootstrap
     if [[ "$scenario" == existing-gzip ]]; then
       docker buildx build --builder "$builder" --progress=plain --provenance=false \

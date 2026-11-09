@@ -13,7 +13,11 @@ cleanup() {
 trap cleanup EXIT
 docker run -d --name "$registry" -p 127.0.0.1::5000 "${REGISTRY_IMAGE:-registry:2}" >/dev/null
 address=$(docker port "$registry" 5000/tcp)
-curl --fail --silent --retry 10 --retry-connrefused --retry-delay 1 "http://$address/v2/" >/dev/null
+curl --fail --silent --show-error --retry 10 --retry-all-errors --retry-delay 1 --max-time 2 "http://$address/v2/" >/dev/null || {
+  status=$?
+  docker logs "$registry" >&2
+  exit "$status"
+}
 docker buildx create --name "$builder" --driver docker-container --driver-opt network=host --driver-opt "image=$image" --bootstrap
 dd if=/dev/urandom of="$work/first" bs=1M count=12 status=none
 dd if=/dev/urandom of="$work/second" bs=1M count=13 status=none
