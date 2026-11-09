@@ -32,6 +32,8 @@ func TestStreamUpload(t *testing.T) {
 				defer mu.Unlock()
 				switch r.Method {
 				case http.MethodPost:
+					// ECR advertises this minimum on the upload-session response.
+					w.Header().Set("OCI-Chunk-Min-Length", "10485760")
 					w.Header().Set("Location", "/upload?state=opaque")
 					w.WriteHeader(http.StatusAccepted)
 				case http.MethodPatch:

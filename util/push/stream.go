@@ -18,7 +18,7 @@ import (
 	ocispecs "github.com/opencontainers/image-spec/specs-go/v1"
 )
 
-const uploadChunkSize = 5 << 20
+const uploadChunkSize = 10 << 20
 
 // StreamUpload sends new gzip bytes before their final digest is known. It is
 // speculative: Commit reports errors, and the ordinary finalized-blob push can
