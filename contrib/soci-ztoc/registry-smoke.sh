@@ -25,19 +25,57 @@ docker buildx build --builder "$builder" --progress=rawjson --provenance=false \
   --output "type=registry,name=$address/test:ok,registry.insecure=true,oci-mediatypes=true,compression=gzip,force-compression=true,soci=true" \
   "$work" 2>&1 | tee "$work/push.log"
 
-python3 - "$address" "$work/push.log" <<'PY'
+# A retained layer should be ready before the last RUN finishes. The unused
+# layer in the COPY source must not be prepared or uploaded speculatively.
+mv "$work/Dockerfile" "$work/Dockerfile.original"
+dd if=/dev/urandom of="$work/third" bs=1M count=14 status=none
+cat > "$work/Dockerfile" <<'DOCKERFILE'
+FROM scratch AS source
+COPY second /unused
+COPY third /copyme
+FROM debian:trixie-slim
+COPY --link first /first
+COPY --link --from=source /copyme /copyme
+ARG CHECK=false
+RUN sleep 8 && ! $CHECK
+DOCKERFILE
+docker buildx build --builder "$builder" --progress=rawjson --provenance=false \
+  --output "type=registry,name=$address/test:early,registry.insecure=true,oci-mediatypes=true,compression=gzip,force-compression=true,soci=true" \
+  "$work" 2>&1 | tee "$work/early.log"
+# The ordinary exporter must retain exactly the same image graph.
+docker buildx build --builder "$builder" --progress=plain --provenance=false \
+  --output "type=registry,name=$address/test:ordinary,registry.insecure=true,oci-mediatypes=true,compression=gzip,force-compression=true" \
+  "$work" > "$work/ordinary.log" 2>&1
+status=0
+timeout --signal=INT 3 docker buildx build --builder "$builder" --provenance=false --build-arg CHECK=cancel \
+  --output "type=registry,name=$address/test:canceled,registry.insecure=true,oci-mediatypes=true,compression=gzip,force-compression=true,soci=true" \
+  "$work" > "$work/canceled.log" 2>&1 || status=$?
+test "$status" = 124
+test "$(curl --silent -o /dev/null -w '%{http_code}' "http://$address/v2/test/manifests/canceled")" = 404
+if docker buildx build --builder "$builder" --provenance=false --build-arg CHECK=true \
+  --output "type=registry,name=$address/test:solve-failed,registry.insecure=true,oci-mediatypes=true,compression=gzip,force-compression=true,soci=true" \
+  "$work" > "$work/solve-failed.log" 2>&1; then
+  echo 'Failed RUN unexpectedly succeeded' >&2; exit 1
+fi
+grep -q 'exit code: 1' "$work/solve-failed.log"
+test "$(curl --silent -o /dev/null -w '%{http_code}' "http://$address/v2/test/manifests/solve-failed")" = 404
+mv "$work/Dockerfile.original" "$work/Dockerfile"
+
+python3 - "$address" "$work/push.log" "$work/early.log" <<'PY'
 import hashlib
 import json
 import sys
 import urllib.request
 
-address, log = sys.argv[1:]
+address, log, early_log = sys.argv[1:]
 def read(kind, digest):
     request = urllib.request.Request(f'http://{address}/v2/test/{kind}/{digest}', headers={
         'Accept': 'application/vnd.oci.image.index.v1+json, application/vnd.oci.image.manifest.v1+json'})
     return urllib.request.urlopen(request).read()
 
+seen = set()
 def walk(desc):
+    seen.add(desc['digest'])
     manifest = desc['mediaType'].endswith('+json') and 'manifest' in desc['mediaType'] or 'index.v1' in desc['mediaType']
     data = read('manifests' if manifest else 'blobs', desc['digest'])
     assert len(data) == desc['size']
@@ -71,6 +109,33 @@ for name, status in statuses.items():
         overlap |= max(indexed[0], uploaded[0]) < min(indexed[1], uploaded[1])
 assert overlap, 'No layer upload overlapped its indexing'
 print('PASS: timestamps prove upload/index overlap; registry graph is complete and digest-verified')
+root = json.loads(read('manifests', 'early'))
+seen.clear()
+for desc in root['manifests']:
+    walk(desc)
+image = next(d for d in root['manifests'] if not d.get('artifactType'))
+early, ordinary = [json.loads(read('manifests', ref)) for ref in (image['digest'], 'ordinary')]
+index = next(d for d in root['manifests'] if d.get('artifactType') == 'application/vnd.amazon.soci.index.v2+json')
+assert early.pop('annotations') == {'com.amazon.soci.index-digest': index['digest']}
+assert early == ordinary, (early, ordinary)
+statuses, vertices = {}, {}
+for line in open(early_log):
+    value = json.loads(line)
+    for status in value.get('statuses', []):
+        if 'completed' in status:
+            statuses.setdefault(status['id'], status)
+    for vertex in value.get('vertexes', []):
+        if 'completed' in vertex:
+            vertices[vertex['name']] = vertex
+last_run = next(v for name, v in vertices.items() if 'RUN sleep 8' in name)
+end = timestamp(last_run['completed'])
+assert any(name.startswith('streaming SOCI index') and interval(s)[1] < end for name, s in statuses.items())
+assert any(name.startswith('uploading ready blob ') and interval(s)[1] < end for name, s in statuses.items())
+for name in statuses:
+    if name.startswith('uploading ready blob '):
+        assert name[len('uploading ready blob '):] in seen, name
+print('PASS: index and uploads complete before final RUN; no discarded layers uploaded; ordinary image unchanged')
+print('PASS: failed and canceled solves never publish their tags')
 PY
 
 # A failed index must never publish a tag, even if some blobs uploaded already.

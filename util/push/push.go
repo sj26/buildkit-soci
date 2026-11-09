@@ -65,7 +65,7 @@ func NewBlobPusher(ctx context.Context, sm *session.Manager, sid, ref string, in
 	if err != nil {
 		return nil, err
 	}
-	var uploads flightcontrol.Group[struct{}]
+	var uploads flightcontrol.CachedGroup[struct{}]
 	return func(ctx context.Context, desc ocispecs.Descriptor, provider content.Provider) error {
 		if images.IsNonDistributable(desc.MediaType) {
 			return nil

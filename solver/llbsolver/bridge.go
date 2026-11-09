@@ -155,7 +155,7 @@ func (b *llbBridge) loadResult(ctx context.Context, def *pb.Definition, cacheImp
 		}
 	}
 
-	res, err := b.builder.Build(ctx, edge)
+	res, err := b.buildWithEarlyExport(ctx, edge)
 	if err != nil {
 		return nil, err
 	}

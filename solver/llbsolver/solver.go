@@ -333,7 +333,35 @@ func (s *Solver) Solve(ctx context.Context, id string, sessionID string, req fro
 		})
 	})
 
+	// Keep early blobs and indexes alive through final manifest publication.
+	lm, err := s.leaseManager()
+	if err != nil {
+		return nil, err
+	}
+	ctx, done, err := leaseutil.WithLease(ctx, lm, leaseutil.MakeTemporary)
+	if err != nil {
+		return nil, err
+	}
+	releasers = append(releasers, func() {
+		done(context.WithoutCancel(ctx))
+	})
+	var prepare []exporter.PrepareFunc
+	for _, exp := range exp.Exporters {
+		if early, ok := exp.(exporter.EarlyExporter); ok {
+			f, err := early.Prepare(ctx, sessionID)
+			if err != nil {
+				return nil, err
+			}
+			if f != nil {
+				prepare = append(prepare, f)
+			}
+		}
+	}
+
 	eg, ctx2 := errgroup.WithContext(ctx)
+	if len(prepare) != 0 {
+		ctx2 = context.WithValue(ctx2, earlyExportKey{}, prepare)
+	}
 	res.EachRef(func(ref solver.ResultProxy) error {
 		eg.Go(func() error {
 			_, err := ref.Result(ctx2)
@@ -375,24 +403,6 @@ func (s *Solver) Solve(ctx context.Context, id string, sessionID string, req fro
 	if err != nil {
 		return nil, err
 	}
-
-	// Functions that create new objects in containerd (eg. content blobs) need to have a lease to ensure
-	// that the object is not garbage collected immediately. This is protected by the individual components,
-	// but because creating a lease is not cheap and requires a disk write, we create a single lease here
-	// early and let all the exporters, cache export, provenance creation, and finalize callbacks use the
-	// same one. The lease must span both artifact creation and the finalize phase (registry push) to
-	// prevent GC from collecting blobs before they are pushed.
-	lm, err := s.leaseManager()
-	if err != nil {
-		return nil, err
-	}
-	ctx, done, err := leaseutil.WithLease(ctx, lm, leaseutil.MakeTemporary)
-	if err != nil {
-		return nil, err
-	}
-	releasers = append(releasers, func() {
-		done(context.WithoutCancel(ctx))
-	})
 
 	cacheExporters, inlineCacheExporter := splitCacheExporters(exp.CacheExporters)
 

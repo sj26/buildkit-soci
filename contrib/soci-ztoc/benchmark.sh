@@ -15,7 +15,14 @@ cleanup_run() {
 }
 cleanup() { cleanup_run; rm -rf "$work"; }
 trap cleanup EXIT
-printf 'FROM %s\n' "$source_image" > "$work/Dockerfile"
+context=$work
+scenario=existing-gzip
+if [[ -d "$source_image" ]]; then
+  context=$source_image
+  scenario=cold-solve
+else
+  printf 'FROM %s\n' "$source_image" > "$work/Dockerfile"
+fi
 docker pull "${REGISTRY_IMAGE:-registry:2}"
 docker image inspect "$baseline" >/dev/null 2>&1 || docker pull "$baseline"
 docker image inspect "$candidate" >/dev/null 2>&1 || docker pull "$candidate"
@@ -23,8 +30,8 @@ lscpu > "$output/host.txt"
 docker info >> "$output/host.txt"
 
 # Same host and source; each arm gets a new builder and empty destination registry.
-# Prime compressed layers without SOCI, outside timing. This isolates indexing and
-# upload of existing gzip layers, not Dockerfile execution or cold compression.
+# An image reference primes gzip outside timing to isolate indexing/upload.
+# A context directory instead measures cold solve, compression, indexing and push.
 for sample in 0 1 2; do
   variants=(baseline candidate)
   (( sample % 2 == 0 )) || variants=(candidate baseline)
@@ -36,27 +43,30 @@ for sample in 0 1 2; do
     address=$(docker port "$registry" 5000/tcp)
     curl --fail --silent --retry 10 --retry-connrefused --retry-delay 1 "http://$address/v2/" >/dev/null
     docker buildx create --name "$builder" --driver docker-container --driver-opt network=host --driver-opt "image=$image" --bootstrap
-    docker buildx build --builder "$builder" --progress=plain --provenance=false \
-      --output 'type=oci,dest=-,oci-mediatypes=true,compression=gzip,force-compression=true,soci=false' \
-      "$work" > /dev/null 2> "$output/$name-prime.log"
+    if [[ "$scenario" == existing-gzip ]]; then
+      docker buildx build --builder "$builder" --progress=plain --provenance=false \
+        --output 'type=oci,dest=-,oci-mediatypes=true,compression=gzip,force-compression=true,soci=false' \
+        "$context" > /dev/null 2> "$output/$name-prime.log"
+    fi
     for phase in cold warm; do
       started=$(date +%s%N)
       docker buildx build --builder "$builder" --progress=plain --provenance=false \
+        --build-arg SOURCE_DATE_EPOCH=0 \
         --metadata-file "$output/$name-$phase-metadata.json" \
         --output "type=registry,name=$address/test:$phase,registry.insecure=true,oci-mediatypes=true,compression=gzip,force-compression=true,soci=true" \
-        "$work" > "$output/$name-$phase.log" 2>&1
+        "$context" > "$output/$name-$phase.log" 2>&1
       elapsed=$(( $(date +%s%N) - started ))
       jq -n --arg variant "$variant" --arg phase "$phase" --arg source "$source_image" \
-        --arg image "$image" --argjson sample "$sample" --argjson elapsed_ns "$elapsed" \
-        '{variant:$variant,phase:$phase,sample:$sample,source:$source,builder:$image,elapsed_s:($elapsed_ns/1000000000)}' \
+        --arg scenario "$scenario" --arg image "$image" --argjson sample "$sample" --argjson elapsed_ns "$elapsed" \
+        '{variant:$variant,phase:$phase,sample:$sample,source:$source,scenario:$scenario,builder:$image,elapsed_s:($elapsed_ns/1000000000)}' \
         | tee "$output/$name-$phase-timing.json"
       curl --fail --silent -H 'Accept: application/vnd.oci.image.index.v1+json' \
         "http://$address/v2/test/manifests/$phase" > "$output/$name-$phase-index.json"
       jq -e '.manifests | any(.artifactType == "application/vnd.amazon.soci.index.v2+json")' "$output/$name-$phase-index.json" > /dev/null
     done
-    grep -q 'indexing SOCI layer' "$output/$name-cold.log"
+    grep -Eq 'indexing SOCI layer|streaming SOCI index' "$output/$name-cold.log"
     grep -q 'reusing SOCI ztoc' "$output/$name-warm.log"
-    if grep -q 'indexing SOCI layer' "$output/$name-warm.log"; then
+    if grep -Eq 'indexing SOCI layer|streaming SOCI index' "$output/$name-warm.log"; then
       echo 'Warm export regenerated indexes' >&2; exit 1
     fi
     docker logs "$registry" > "$output/$name-registry.log" 2>&1

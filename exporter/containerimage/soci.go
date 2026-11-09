@@ -41,7 +41,7 @@ var sociSlots = semaphore.NewWeighted(2)
 type sociIndexer struct {
 	store          content.Store
 	helper         string
-	layers         flightcontrol.Group[ocispecs.Descriptor]
+	layers         flightcontrol.CachedGroup[ocispecs.Descriptor]
 	manifests      map[digest.Digest]ocispecs.Descriptor
 	push           func(context.Context, ocispecs.Descriptor, content.Provider) error
 	remote         map[digest.Digest]ocispecs.Descriptor

@@ -18,6 +18,14 @@ type Exporter interface {
 	Resolve(context.Context, int, map[string]string) (ExporterInstance, error)
 }
 
+// EarlyExporter can prepare final-image ancestors while the remaining solve runs.
+// A nil callback opts out. The solve lease covers preparation and final export.
+type EarlyExporter interface {
+	Prepare(context.Context, string) (PrepareFunc, error)
+}
+
+type PrepareFunc func(context.Context, cache.ImmutableRef) error
+
 // FinalizeFunc completes an export operation after all exports have created
 // their artifacts. It may perform network operations like pushing to a registry.
 //

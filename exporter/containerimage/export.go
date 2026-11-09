@@ -222,6 +222,61 @@ func (e *imageExporterInstance) Attrs() map[string]string {
 	return e.attrs
 }
 
+func (e *imageExporterInstance) Prepare(ctx context.Context, sessionID string) (exporter.PrepareFunc, error) {
+	// Frontend-supplied names are not known until Export receives its metadata.
+	if !e.opts.SOCI || e.opts.ImageName == "*" {
+		return nil, nil
+	}
+	if err := e.prepareSOCI(ctx, &e.opts, sessionID); err != nil {
+		return nil, err
+	}
+	cfg := e.opts.RefCfg
+	cfg.OnBlobReady = e.opts.soci.indexLayer
+	cfg.Compression.OnCompressed = e.opts.soci.newStream
+	return func(ctx context.Context, ref cache.ImmutableRef) error {
+		_, err := ref.GetRemotes(ctx, true, cfg, false, session.NewGroup(sessionID))
+		return err
+	}, nil
+}
+
+func (e *imageExporterInstance) prepareSOCI(ctx context.Context, opts *ImageCommitOpts, sessionID string) error {
+	if !opts.SOCI || opts.soci != nil {
+		return nil
+	}
+	indexer, err := newSociIndexer(e.opt.ImageWriter.ContentStore())
+	if err != nil {
+		return err
+	}
+	if opts.SOCICacheFrom != "" {
+		if err := e.importSOCICache(ctx, indexer, opts.SOCICacheFrom, sessionID); err != nil {
+			return err
+		}
+	}
+	if e.push {
+		var pushers []func(context.Context, ocispecs.Descriptor, content.Provider) error
+		for name := range strings.SplitSeq(opts.ImageName, ",") {
+			if name == "" {
+				continue
+			}
+			p, err := push.NewBlobPusher(ctx, e.opt.SessionManager, sessionID, name, e.insecure, e.opt.RegistryHosts)
+			if err != nil {
+				return err
+			}
+			pushers = append(pushers, p)
+		}
+		indexer.push = func(ctx context.Context, desc ocispecs.Descriptor, provider content.Provider) error {
+			for _, p := range pushers {
+				if err := p(ctx, desc, provider); err != nil {
+					return err
+				}
+			}
+			return nil
+		}
+	}
+	opts.soci = indexer
+	return nil
+}
+
 func (e *imageExporterInstance) Export(ctx context.Context, src *exporter.Source, buildInfo exporter.ExportBuildInfo) (_ map[string]string, _ exporter.FinalizeFunc, descref exporter.DescriptorReference, err error) {
 	src = src.Clone()
 	if src.Metadata == nil {
@@ -254,41 +309,11 @@ func (e *imageExporterInstance) Export(ctx context.Context, src *exporter.Source
 		}
 	}()
 
-	if opts.SOCI {
-		opts.soci, err = newSociIndexer(e.opt.ImageWriter.ContentStore())
-		if err != nil {
-			return nil, nil, nil, err
-		}
-		if opts.SOCICacheFrom != "" {
-			if err := e.importSOCICache(ctx, opts.soci, opts.SOCICacheFrom, buildInfo.SessionID); err != nil {
-				return nil, nil, nil, err
-			}
-		}
+	if opts.SOCI && opts.ImageName == "*" {
+		opts.ImageName = string(src.Metadata["image.name"])
 	}
-	if opts.SOCI && e.push {
-		names := opts.ImageName
-		if names == "*" {
-			names = string(src.Metadata["image.name"])
-		}
-		var pushers []func(context.Context, ocispecs.Descriptor, content.Provider) error
-		for name := range strings.SplitSeq(names, ",") {
-			if name == "" {
-				continue
-			}
-			p, err := push.NewBlobPusher(ctx, e.opt.SessionManager, buildInfo.SessionID, name, e.insecure, e.opt.RegistryHosts)
-			if err != nil {
-				return nil, nil, nil, err
-			}
-			pushers = append(pushers, p)
-		}
-		opts.soci.push = func(ctx context.Context, desc ocispecs.Descriptor, provider content.Provider) error {
-			for _, p := range pushers {
-				if err := p(ctx, desc, provider); err != nil {
-					return err
-				}
-			}
-			return nil
-		}
+	if err := e.prepareSOCI(ctx, &opts, buildInfo.SessionID); err != nil {
+		return nil, nil, nil, err
 	}
 
 	desc, committedRemotes, err := e.opt.ImageWriter.Commit(ctx, src, buildInfo.SessionID, buildInfo.InlineCache, &opts, buildInfo.CompatibilityVersion, e.Type())
