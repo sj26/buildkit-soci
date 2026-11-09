@@ -22,6 +22,7 @@ import (
 	"github.com/containerd/containerd/v2/pkg/labels"
 	"github.com/containerd/containerd/v2/plugins/diff/walking"
 	cerrdefs "github.com/containerd/errdefs"
+	cacheconfig "github.com/moby/buildkit/cache/config"
 	"github.com/moby/buildkit/session"
 	"github.com/moby/buildkit/util/bklog"
 	"github.com/moby/buildkit/util/compression"
@@ -45,7 +46,7 @@ var ErrNoBlobs = errors.Errorf("no blobs for snapshot")
 // a blob is missing and createIfNeeded is true, then the blob will be created, otherwise ErrNoBlobs will
 // be returned. Caller must hold a lease when calling this function.
 // If forceCompression is specified but the blob of compressionType doesn't exist, this function creates it.
-func (sr *immutableRef) computeBlobChain(ctx context.Context, createIfNeeded bool, comp compression.Config, s session.Group) error {
+func (sr *immutableRef) computeBlobChain(ctx context.Context, createIfNeeded bool, cfg cacheconfig.RefConfig, s session.Group) error {
 	if _, ok := leases.FromContext(ctx); !ok {
 		return errors.Errorf("missing lease requirement for computeBlobChain")
 	}
@@ -71,28 +72,29 @@ func (sr *immutableRef) computeBlobChain(ctx context.Context, createIfNeeded boo
 	// refs rather than every single layer present among their ancestors.
 	filter := sr.layerSet()
 
-	return computeBlobChain(ctx, sr, createIfNeeded, comp, s, filter)
+	return computeBlobChain(ctx, sr, createIfNeeded, cfg, s, filter)
 }
 
-func computeBlobChain(ctx context.Context, sr *immutableRef, createIfNeeded bool, comp compression.Config, s session.Group, filter map[string]struct{}) error {
+func computeBlobChain(ctx context.Context, sr *immutableRef, createIfNeeded bool, cfg cacheconfig.RefConfig, s session.Group, filter map[string]struct{}) error {
+	comp := cfg.Compression
 	eg, ctx := errgroup.WithContext(ctx)
 	switch sr.kind() {
 	case Merge:
 		for _, parent := range sr.mergeParents {
 			eg.Go(func() error {
-				return computeBlobChain(ctx, parent, createIfNeeded, comp, s, filter)
+				return computeBlobChain(ctx, parent, createIfNeeded, cfg, s, filter)
 			})
 		}
 	case Diff:
 		if _, ok := filter[sr.ID()]; !ok && sr.diffParents.upper != nil {
 			// This diff is just re-using the upper blob, compute that
 			eg.Go(func() error {
-				return computeBlobChain(ctx, sr.diffParents.upper, createIfNeeded, comp, s, filter)
+				return computeBlobChain(ctx, sr.diffParents.upper, createIfNeeded, cfg, s, filter)
 			})
 		}
 	case Layer:
 		eg.Go(func() error {
-			return computeBlobChain(ctx, sr.layerParent, createIfNeeded, comp, s, filter)
+			return computeBlobChain(ctx, sr.layerParent, createIfNeeded, cfg, s, filter)
 		})
 	}
 
@@ -302,6 +304,21 @@ func computeBlobChain(ctx context.Context, sr *immutableRef, createIfNeeded bool
 			if comp.Force {
 				if err := ensureCompression(ctx, sr, comp, s); err != nil {
 					return errors.Wrapf(err, "failed to ensure compression type of %q", comp.Type)
+				}
+			}
+			if cfg.OnBlobReady != nil {
+				desc, err := sr.ociDesc(ctx, sr.descHandlers, cfg.PreferNonDistributable)
+				if err != nil {
+					return err
+				}
+				if comp.Force {
+					desc, err = sr.getBlobWithCompression(ctx, comp.Type)
+					if err != nil {
+						return err
+					}
+				}
+				if err := cfg.OnBlobReady(ctx, desc, lazyRefProvider{ref: sr, desc: desc, dh: sr.descHandlers[desc.Digest], session: s}); err != nil {
+					return err
 				}
 			}
 			return nil

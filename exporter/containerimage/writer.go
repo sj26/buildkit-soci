@@ -69,7 +69,7 @@ type ImageWriter struct {
 // the manifest (or the manifest list) and the remotes that were committed for
 // each platform. The returned remotes contain the rewritten layers when
 // opts.RewriteTimestamp is set.
-func (ic *ImageWriter) Commit(ctx context.Context, inp *exporter.Source, sessionID string, inlineCache exptypes.InlineCache, opts *ImageCommitOpts, compatibilityVersion int, exporterType string) (*ocispecs.Descriptor, *result.Result[*solver.Remote], error) {
+func (ic *ImageWriter) Commit(ctx context.Context, inp *exporter.Source, sessionID string, inlineCache exptypes.InlineCache, opts *ImageCommitOpts, compatibilityVersion int, exporterType string) (resultDesc *ocispecs.Descriptor, resultRemotes *result.Result[*solver.Remote], retErr error) {
 	if _, ok := inp.Metadata[exptypes.ExporterPlatformsKey]; len(inp.Refs) > 0 && !ok {
 		return nil, nil, errors.Errorf("unable to export multiple refs, missing platforms mapping")
 	}
@@ -86,6 +86,24 @@ func (ic *ImageWriter) Commit(ctx context.Context, inp *exporter.Source, session
 	ps, err := exptypes.ParsePlatforms(inp.Metadata)
 	if err != nil {
 		return nil, nil, err
+	}
+
+	if opts.SOCI {
+		for _, p := range ps.Platforms {
+			if p.Platform.OS != "linux" {
+				return nil, nil, errors.New("soci=true currently supports Linux images only")
+			}
+		}
+		opts.soci, err = newSociIndexer(ic.opt.ContentStore)
+		if err != nil {
+			return nil, nil, err
+		}
+		opts.RefCfg.OnBlobReady = opts.soci.indexLayer
+		defer func() {
+			if retErr == nil {
+				resultDesc, retErr = opts.soci.wrap(ctx, resultDesc)
+			}
+		}()
 	}
 
 	if !isMap {
@@ -573,6 +591,17 @@ func (ic *ImageWriter) commitDistributionManifest(ctx context.Context, opts *Ima
 		labels[fmt.Sprintf("containerd.io/gc.ref.content.%d", i+1)] = desc.Digest.String()
 	}
 
+	var sociDesc *ocispecs.Descriptor
+	if opts.soci != nil {
+		sociDesc, err = opts.soci.annotate(ctx, &mfst, remote.Provider)
+		if err != nil {
+			return nil, nil, err
+		}
+		if sociDesc != nil {
+			labels["containerd.io/gc.ref.content.soci"] = sociDesc.Digest.String()
+		}
+	}
+
 	mfstJSON, err := json.MarshalIndent(mfst, "", "  ")
 	if err != nil {
 		return nil, nil, errors.Wrap(err, "failed to marshal manifest")
@@ -602,6 +631,9 @@ func (ic *ImageWriter) commitDistributionManifest(ctx context.Context, opts *Ima
 	}
 	configDone(nil)
 
+	if sociDesc != nil {
+		opts.soci.manifests[mfstDigest] = *sociDesc
+	}
 	return &ocispecs.Descriptor{
 		Annotations: annotations.ManifestDescriptor,
 		Digest:      mfstDigest,

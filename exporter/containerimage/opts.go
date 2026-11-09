@@ -21,6 +21,8 @@ type ImageCommitOpts struct {
 
 	ForceInlineAttestations bool // force inline attestations to be attached
 	RewriteTimestamp        bool // rewrite timestamps in layers to match the epoch
+	SOCI                    bool
+	soci                    *sociIndexer
 }
 
 func (c *ImageCommitOpts) Load(ctx context.Context, opt map[string]string) (map[string]string, error) {
@@ -60,6 +62,8 @@ func (c *ImageCommitOpts) Load(ctx context.Context, opt map[string]string) (map[
 			err = parseBool(&c.RefCfg.PreferNonDistributable, k, v)
 		case exptypes.OptKeyRewriteTimestamp:
 			err = parseBool(&c.RewriteTimestamp, k, v)
+		case exptypes.OptKeySOCI:
+			err = parseBool(&c.SOCI, k, v)
 		default:
 			rest[k] = v
 		}
@@ -79,6 +83,17 @@ func (c *ImageCommitOpts) Load(ctx context.Context, opt map[string]string) (map[
 }
 
 func (c *ImageCommitOpts) Validate() error {
+	if c.SOCI {
+		if c.RefCfg.Compression.Type != compression.Gzip || !c.RefCfg.Compression.Force {
+			return errors.New("soci=true requires compression=gzip,force-compression=true")
+		}
+		if c.RewriteTimestamp {
+			return errors.New("soci=true does not yet support rewrite-timestamp")
+		}
+		if c.OCITypes != nil && !c.OCITypesEnabled() {
+			return errors.New("soci=true requires oci-mediatypes=true")
+		}
+	}
 	if c.OCITypes == nil {
 		return nil
 	}

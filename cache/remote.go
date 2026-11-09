@@ -150,7 +150,7 @@ func getAvailableBlobs(ctx context.Context, cs content.Store, chain *solver.Remo
 }
 
 func (sr *immutableRef) getRemote(ctx context.Context, createIfNeeded bool, refCfg config.RefConfig, s session.Group) (*solver.Remote, error) {
-	err := sr.computeBlobChain(ctx, createIfNeeded, refCfg.Compression, s)
+	err := sr.computeBlobChain(ctx, createIfNeeded, refCfg, s)
 	if err != nil {
 		return nil, err
 	}
