@@ -18,11 +18,12 @@ docker buildx create --name "$builder" --driver docker-container --driver-opt ne
 dd if=/dev/urandom of="$work/first" bs=1M count=12 status=none
 dd if=/dev/urandom of="$work/second" bs=1M count=13 status=none
 printf 'FROM scratch\nCOPY first /first\nCOPY second /second\n' > "$work/Dockerfile"
-docker buildx build --builder "$builder" --progress=plain --provenance=false \
+docker buildx build --builder "$builder" --progress=rawjson --provenance=false \
   --output "type=registry,name=$address/test:ok,registry.insecure=true,oci-mediatypes=true,compression=gzip,force-compression=true,soci=true" \
   "$work" 2>&1 | tee "$work/push.log"
 
 python3 - "$address" "$work/push.log" <<'PY'
+from datetime import datetime
 import hashlib
 import json
 import sys
@@ -49,9 +50,21 @@ indexes = [d for d in root['manifests'] if d.get('artifactType') == 'application
 assert len(indexes) == 1
 for desc in root['manifests']:
     walk(desc)
-lines = open(log).readlines()
-assert next(i for i,l in enumerate(lines) if 'uploading ready blob' in l) < next(i for i,l in enumerate(lines) if 'exporting layers' in l and 'done' in l)
-print('PASS: early uploads produce a complete, digest-verified registry graph')
+statuses = {}
+for line in open(log):
+    for status in json.loads(line).get('statuses', []):
+        if 'completed' in status:
+            statuses[status['id']] = status
+def interval(status):
+    return [datetime.fromisoformat(status[k].replace('Z', '+00:00')) for k in ('started', 'completed')]
+overlap = False
+for name, status in statuses.items():
+    if name.startswith('indexing SOCI layer '):
+        indexed = interval(status)
+        uploaded = interval(statuses[name.replace('indexing SOCI layer ', 'uploading ready blob ')])
+        overlap |= max(indexed[0], uploaded[0]) < min(indexed[1], uploaded[1])
+assert overlap, 'No layer upload overlapped its indexing'
+print('PASS: timestamps prove upload/index overlap; registry graph is complete and digest-verified')
 PY
 
 # A failed index must never publish a tag, even if some blobs uploaded already.
