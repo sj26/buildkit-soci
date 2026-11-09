@@ -312,9 +312,13 @@ func computeBlobChain(ctx context.Context, sr *immutableRef, createIfNeeded bool
 					return err
 				}
 				if comp.Force {
-					desc, err = sr.getBlobWithCompression(ctx, comp.Type)
-					if err != nil {
+					if needs, err := comp.Type.NeedsConversion(ctx, sr.cm.ContentStore, desc); err != nil {
 						return err
+					} else if needs {
+						desc, err = sr.getBlobWithCompression(ctx, comp.Type)
+						if err != nil {
+							return err
+						}
 					}
 				}
 				if err := cfg.OnBlobReady(ctx, desc, lazyRefProvider{ref: sr, desc: desc, dh: sr.descHandlers[desc.Digest], session: s}); err != nil {

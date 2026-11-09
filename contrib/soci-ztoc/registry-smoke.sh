@@ -79,3 +79,47 @@ fi
 grep -q 'exit status 73' "$work/failed.log"
 test "$(curl --silent -o /dev/null -w '%{http_code}' "http://$address/v2/test/manifests/failed")" = 404
 echo 'PASS: failed export does not publish a tag'
+
+# A fresh daemon with a broken indexer must reuse the published zTOCs without
+# downloading the base image's layers. A new layer must still need the indexer.
+docker buildx rm "$builder" >/dev/null
+docker buildx create --name "$builder" --driver docker-container --driver-opt network=host --driver-opt "image=$image" --bootstrap
+docker exec "buildx_buildkit_${builder}0" sh -c 'printf "#!/bin/sh\nexit 73\n" > /usr/bin/buildkit-soci-ztoc'
+printf 'FROM %s/test:ok\n' "$address" > "$work/Dockerfile"
+docker logs "$registry" > "$work/registry-before.log" 2>&1
+docker buildx build --builder "$builder" --progress=plain --provenance=false \
+  --output "type=registry,name=$address/test:reused,registry.insecure=true,oci-mediatypes=true,compression=gzip,force-compression=true,soci=true,soci-cache-from=$address/test:ok" \
+  "$work" 2>&1 | tee "$work/reused.log"
+grep -q 'reusing remote SOCI ztoc' "$work/reused.log"
+docker logs "$registry" > "$work/registry-after.log" 2>&1
+python3 - "$address" "$work" <<'PY'
+import json
+import pathlib
+import sys
+import urllib.request
+
+address, work = sys.argv[1], pathlib.Path(sys.argv[2])
+def manifest(ref):
+    request = urllib.request.Request(f'http://{address}/v2/test/manifests/{ref}', headers={
+        'Accept': 'application/vnd.oci.image.index.v1+json, application/vnd.oci.image.manifest.v1+json'})
+    return json.load(urllib.request.urlopen(request))
+original, reused = manifest('ok'), manifest('reused')
+def soci(root):
+    return next(d for d in root['manifests'] if d.get('artifactType') == 'application/vnd.amazon.soci.index.v2+json')
+assert soci(original)['digest'] == soci(reused)['digest']
+image = manifest(next(d['digest'] for d in original['manifests'] if not d.get('artifactType')))
+before, after = [(work / f'registry-{p}.log').read_text() for p in ('before', 'after')]
+new_requests = after[len(before):]
+for layer in image['layers']:
+    assert not any('http.request.method=GET' in line and '/blobs/' + layer['digest'] in line for line in new_requests.splitlines())
+print('PASS: fresh builder reused identical zTOCs without downloading image layers')
+PY
+printf 'COPY first /new\n' >> "$work/Dockerfile"
+if docker buildx build --builder "$builder" --provenance=false \
+  --output "type=registry,name=$address/test:changed,registry.insecure=true,oci-mediatypes=true,compression=gzip,force-compression=true,soci=true,soci-cache-from=$address/test:ok" \
+  "$work" > "$work/changed.log" 2>&1; then
+  echo 'New layer incorrectly reused a cached index' >&2; exit 1
+fi
+grep -q 'exit status 73' "$work/changed.log"
+test "$(curl --silent -o /dev/null -w '%{http_code}' "http://$address/v2/test/manifests/changed")" = 404
+echo 'PASS: a changed layer is not accepted as a remote cache hit'

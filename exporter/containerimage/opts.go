@@ -22,6 +22,7 @@ type ImageCommitOpts struct {
 	ForceInlineAttestations bool // force inline attestations to be attached
 	RewriteTimestamp        bool // rewrite timestamps in layers to match the epoch
 	SOCI                    bool
+	SOCICacheFrom           string
 	soci                    *sociIndexer
 }
 
@@ -64,6 +65,8 @@ func (c *ImageCommitOpts) Load(ctx context.Context, opt map[string]string) (map[
 			err = parseBool(&c.RewriteTimestamp, k, v)
 		case exptypes.OptKeySOCI:
 			err = parseBool(&c.SOCI, k, v)
+		case exptypes.OptKeySOCICacheFrom:
+			c.SOCICacheFrom = v
 		default:
 			rest[k] = v
 		}
@@ -83,6 +86,9 @@ func (c *ImageCommitOpts) Load(ctx context.Context, opt map[string]string) (map[
 }
 
 func (c *ImageCommitOpts) Validate() error {
+	if c.SOCICacheFrom != "" && !c.SOCI {
+		return errors.New("soci-cache-from requires soci=true")
+	}
 	if c.SOCI {
 		if c.RefCfg.Compression.Type != compression.Gzip || !c.RefCfg.Compression.Force {
 			return errors.New("soci=true requires compression=gzip,force-compression=true")

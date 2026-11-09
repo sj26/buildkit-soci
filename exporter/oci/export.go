@@ -77,6 +77,9 @@ func (e *imageExporter) Resolve(ctx context.Context, id int, opt map[string]stri
 	if err != nil {
 		return nil, err
 	}
+	if i.opts.SOCICacheFrom != "" {
+		return nil, errors.New("soci-cache-from requires an image or registry exporter")
+	}
 
 	for k, v := range opt {
 		switch k {

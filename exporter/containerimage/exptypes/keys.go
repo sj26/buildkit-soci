@@ -81,6 +81,9 @@ var (
 	// Generate SOCI v2 indexes during layer export (experimental).
 	OptKeySOCI ImageExporterOptKey = "soci"
 
+	// Reuse compatible zTOCs from a previously published SOCI image.
+	OptKeySOCICacheFrom ImageExporterOptKey = "soci-cache-from"
+
 	// Compression level
 	// Value: int (0-9) for gzip and estargz
 	// Value: int (0-22) for zstd

@@ -14,8 +14,10 @@ import (
 	"github.com/containerd/containerd/v2/core/content"
 	"github.com/containerd/containerd/v2/core/images"
 	"github.com/containerd/errdefs"
+	"github.com/moby/buildkit/util/contentutil"
 	"github.com/moby/buildkit/util/flightcontrol"
 	"github.com/moby/buildkit/util/progress"
+	"github.com/moby/buildkit/util/progress/logs"
 	digest "github.com/opencontainers/go-digest"
 	"github.com/opencontainers/image-spec/specs-go"
 	ocispecs "github.com/opencontainers/image-spec/specs-go/v1"
@@ -30,17 +32,20 @@ const (
 	sociSpanSize        = 4 << 20
 	sociMinLayerSize    = 10 << 20
 	sociCacheLabel      = "containerd.io/gc.ref.content.soci-0.16.1-4m-v1"
+	sociBuildTool       = "BuildKit SOCI spike / soci v0.16.1"
 )
 
 // Bound native indexers across concurrent Bake targets, leaving CPU for compression.
 var sociSlots = semaphore.NewWeighted(2)
 
 type sociIndexer struct {
-	store     content.Store
-	helper    string
-	layers    flightcontrol.Group[ocispecs.Descriptor]
-	manifests map[digest.Digest]ocispecs.Descriptor
-	push      func(context.Context, ocispecs.Descriptor, content.Provider) error
+	store          content.Store
+	helper         string
+	layers         flightcontrol.Group[ocispecs.Descriptor]
+	manifests      map[digest.Digest]ocispecs.Descriptor
+	push           func(context.Context, ocispecs.Descriptor, content.Provider) error
+	remote         map[digest.Digest]ocispecs.Descriptor
+	remoteProvider content.Provider
 }
 
 func newSociIndexer(store content.Store) (*sociIndexer, error) {
@@ -86,6 +91,21 @@ func (s *sociIndexer) layer(ctx context.Context, layer ocispecs.Descriptor, prov
 				}
 			}
 		} else if !errdefs.IsNotFound(err) {
+			return out, err
+		}
+		if cached, ok := s.remote[layer.Digest]; ok && cached.Annotations["com.amazon.soci.image-layer-mediaType"] == layer.MediaType {
+			done := progress.OneOff(ctx, "reusing remote SOCI ztoc "+layer.Digest.String())
+			defer func() { done(retErr) }()
+			if err := contentutil.Copy(ctx, s.store, s.remoteProvider, cached, "", logs.LoggerFromContext(ctx)); err != nil {
+				return out, err
+			}
+			out = sociLayerDescriptor(layer, cached.Digest, cached.Size)
+			// A lazy imported layer may not be local. The output manifest and solve
+			// lease retain its zTOC without forcing the layer itself to be fetched.
+			_, err := s.store.Update(ctx, content.Info{Digest: layer.Digest, Labels: map[string]string{sociCacheLabel: out.Digest.String()}}, "labels."+sociCacheLabel)
+			if errdefs.IsNotFound(err) {
+				err = nil
+			}
 			return out, err
 		}
 		if err := sociSlots.Acquire(ctx, 1); err != nil {
@@ -186,7 +206,7 @@ func (s *sociIndexer) annotate(ctx context.Context, manifest *ocispecs.Manifest,
 	index := ocispecs.Manifest{
 		Versioned: specs.Versioned{SchemaVersion: 2}, MediaType: ocispecs.MediaTypeImageManifest,
 		Config: config, Layers: ztocs,
-		Annotations: map[string]string{"com.amazon.soci.build-tool-identifier": "BuildKit SOCI spike / soci v0.16.1"},
+		Annotations: map[string]string{"com.amazon.soci.build-tool-identifier": sociBuildTool},
 	}
 	desc, err := s.writeJSON(ctx, index, index.MediaType, append([]ocispecs.Descriptor{config}, ztocs...))
 	if err != nil {

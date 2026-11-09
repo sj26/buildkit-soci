@@ -254,11 +254,18 @@ func (e *imageExporterInstance) Export(ctx context.Context, src *exporter.Source
 		}
 	}()
 
-	if opts.SOCI && e.push {
+	if opts.SOCI {
 		opts.soci, err = newSociIndexer(e.opt.ImageWriter.ContentStore())
 		if err != nil {
 			return nil, nil, nil, err
 		}
+		if opts.SOCICacheFrom != "" {
+			if err := e.importSOCICache(ctx, opts.soci, opts.SOCICacheFrom, buildInfo.SessionID); err != nil {
+				return nil, nil, nil, err
+			}
+		}
+	}
+	if opts.SOCI && e.push {
 		names := opts.ImageName
 		if names == "*" {
 			names = string(src.Metadata["image.name"])
