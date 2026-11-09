@@ -21,7 +21,7 @@ import (
 )
 
 func TestStreamUpload(t *testing.T) {
-	for _, mode := range []string{"complete", "failed-patch", "cancel"} {
+	for _, mode := range []string{"complete", "created", "no-content", "failed-patch", "cancel"} {
 		t.Run(mode, func(t *testing.T) {
 			var mu sync.Mutex
 			var received bytes.Buffer
@@ -55,7 +55,14 @@ func TestStreamUpload(t *testing.T) {
 					}
 					io.Copy(&received, r.Body)
 					w.Header().Set("Location", "/upload?state=opaque")
-					w.WriteHeader(http.StatusAccepted)
+					switch mode {
+					case "created":
+						w.WriteHeader(http.StatusCreated)
+					case "no-content":
+						w.WriteHeader(http.StatusNoContent)
+					default:
+						w.WriteHeader(http.StatusAccepted)
+					}
 				case http.MethodPut:
 					io.Copy(&received, r.Body)
 					if r.URL.Query().Get("digest") != digest.FromBytes(received.Bytes()).String() {
@@ -114,7 +121,7 @@ func TestStreamUpload(t *testing.T) {
 			}
 			upload.Close()
 			mu.Lock()
-			if mode == "complete" {
+			if mode != "failed-patch" && mode != "cancel" {
 				if !committed || deleted || !bytes.Equal(received.Bytes(), data) {
 					t.Fatal("incorrect committed blob")
 				}

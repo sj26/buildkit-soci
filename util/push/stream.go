@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -134,7 +135,7 @@ func (u *StreamUpload) run() (retErr error) {
 }
 
 func (u *StreamUpload) patch(data []byte) error {
-	if _, err := u.request(u.ctx, http.MethodPatch, u.location, data, http.StatusAccepted); err != nil {
+	if _, err := u.request(u.ctx, http.MethodPatch, u.location, data, http.StatusAccepted, http.StatusCreated, http.StatusNoContent); err != nil {
 		return err
 	}
 	u.offset += int64(len(data))
@@ -187,7 +188,7 @@ func (u *StreamUpload) Close() {
 	}
 }
 
-func (u *StreamUpload) request(ctx context.Context, method string, location *url.URL, data []byte, status int) (*http.Response, error) {
+func (u *StreamUpload) request(ctx context.Context, method string, location *url.URL, data []byte, statuses ...int) (*http.Response, error) {
 	ctx, release, err := limited.Default.Acquire(ctx, u.pusher.ref.String(), ocispecs.Descriptor{})
 	if err != nil {
 		return nil, err
@@ -229,8 +230,8 @@ func (u *StreamUpload) request(ctx context.Context, method string, location *url
 			}
 			continue
 		}
-		if resp.StatusCode != status {
-			return nil, fmt.Errorf("registry %s returned %d, expected %d", method, resp.StatusCode, status)
+		if !slices.Contains(statuses, resp.StatusCode) {
+			return nil, fmt.Errorf("registry %s returned %d, expected %v", method, resp.StatusCode, statuses)
 		}
 		if next := resp.Header.Get("Location"); next != "" && (method == http.MethodPost || method == http.MethodPatch) {
 			u.location, err = location.Parse(next)
