@@ -94,9 +94,11 @@ func (ic *ImageWriter) Commit(ctx context.Context, inp *exporter.Source, session
 				return nil, nil, errors.New("soci=true currently supports Linux images only")
 			}
 		}
-		opts.soci, err = newSociIndexer(ic.opt.ContentStore)
-		if err != nil {
-			return nil, nil, err
+		if opts.soci == nil {
+			opts.soci, err = newSociIndexer(ic.opt.ContentStore)
+			if err != nil {
+				return nil, nil, err
+			}
 		}
 		opts.RefCfg.OnBlobReady = opts.soci.indexLayer
 		defer func() {

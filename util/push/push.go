@@ -46,6 +46,41 @@ func Pusher(ctx context.Context, resolver remotes.Resolver, ref string) (remotes
 	return &pusher{Pusher: p}, nil
 }
 
+// NewBlobPusher uploads ready content without publishing manifests or tags.
+// The normal Push path still verifies the complete graph and publishes it last.
+func NewBlobPusher(ctx context.Context, sm *session.Manager, sid, ref string, insecure bool, hosts docker.RegistryHosts) (func(context.Context, ocispecs.Descriptor, content.Provider) error, error) {
+	parsed, err := reference.ParseNormalizedNamed(ref)
+	if err != nil {
+		return nil, err
+	}
+	scope := resolver.ScopeType{Push: true, Insecure: insecure}
+	if insecure {
+		yes := true
+		hosts = resolver.NewRegistryConfig(map[string]resolverconfig.RegistryConfig{
+			reference.Domain(parsed): {Insecure: &yes, PlainHTTP: &yes},
+		})
+	}
+	r := resolver.DefaultPool.GetResolver(hosts, ref, scope, sm, session.NewGroup(sid))
+	p, err := Pusher(ctx, r, ref)
+	if err != nil {
+		return nil, err
+	}
+	var uploads flightcontrol.Group[struct{}]
+	return func(ctx context.Context, desc ocispecs.Descriptor, provider content.Provider) error {
+		if images.IsNonDistributable(desc.MediaType) {
+			return nil
+		}
+		_, err := uploads.Do(ctx, desc.Digest.String(), func(ctx context.Context) (_ struct{}, retErr error) {
+			done := progress.OneOff(ctx, "uploading ready blob "+desc.Digest.String())
+			defer func() { done(retErr) }()
+			handler := retryhandler.New(limited.PushHandler(p, provider, ref), logs.LoggerFromContext(ctx))
+			_, err := handler(ctx, desc)
+			return struct{}{}, err
+		})
+		return err
+	}, nil
+}
+
 func Push(ctx context.Context, sm *session.Manager, sid string, provider content.Provider, manager content.Manager, dgst digest.Digest, ref string, insecure bool, hosts docker.RegistryHosts, byDigest bool, annotations map[digest.Digest]map[string]string) error {
 	ctx = contentutil.RegisterContentPayloadTypes(ctx)
 	desc := ocispecs.Descriptor{

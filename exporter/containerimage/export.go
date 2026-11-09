@@ -254,6 +254,36 @@ func (e *imageExporterInstance) Export(ctx context.Context, src *exporter.Source
 		}
 	}()
 
+	if opts.SOCI && e.push {
+		opts.soci, err = newSociIndexer(e.opt.ImageWriter.ContentStore())
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		names := opts.ImageName
+		if names == "*" {
+			names = string(src.Metadata["image.name"])
+		}
+		var pushers []func(context.Context, ocispecs.Descriptor, content.Provider) error
+		for name := range strings.SplitSeq(names, ",") {
+			if name == "" {
+				continue
+			}
+			p, err := push.NewBlobPusher(ctx, e.opt.SessionManager, buildInfo.SessionID, name, e.insecure, e.opt.RegistryHosts)
+			if err != nil {
+				return nil, nil, nil, err
+			}
+			pushers = append(pushers, p)
+		}
+		opts.soci.push = func(ctx context.Context, desc ocispecs.Descriptor, provider content.Provider) error {
+			for _, p := range pushers {
+				if err := p(ctx, desc, provider); err != nil {
+					return err
+				}
+			}
+			return nil
+		}
+	}
+
 	desc, committedRemotes, err := e.opt.ImageWriter.Commit(ctx, src, buildInfo.SessionID, buildInfo.InlineCache, &opts, buildInfo.CompatibilityVersion, e.Type())
 	if err != nil {
 		return nil, nil, nil, err

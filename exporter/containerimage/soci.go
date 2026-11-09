@@ -20,6 +20,7 @@ import (
 	"github.com/opencontainers/image-spec/specs-go"
 	ocispecs "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/pkg/errors"
+	"golang.org/x/sync/errgroup"
 	"golang.org/x/sync/semaphore"
 )
 
@@ -39,6 +40,7 @@ type sociIndexer struct {
 	helper    string
 	layers    flightcontrol.Group[ocispecs.Descriptor]
 	manifests map[digest.Digest]ocispecs.Descriptor
+	push      func(context.Context, ocispecs.Descriptor, content.Provider) error
 }
 
 func newSociIndexer(store content.Store) (*sociIndexer, error) {
@@ -50,11 +52,23 @@ func newSociIndexer(store content.Store) (*sociIndexer, error) {
 }
 
 func (s *sociIndexer) indexLayer(ctx context.Context, layer ocispecs.Descriptor, provider content.Provider) error {
-	if layer.Size < sociMinLayerSize {
-		return nil
+	eg, ctx := errgroup.WithContext(ctx)
+	if s.push != nil {
+		eg.Go(func() error { return s.push(ctx, layer, provider) })
 	}
-	_, err := s.layer(ctx, layer, provider)
-	return err
+	if layer.Size >= sociMinLayerSize {
+		eg.Go(func() error {
+			ztoc, err := s.layer(ctx, layer, provider)
+			if err != nil {
+				return err
+			}
+			if s.push != nil {
+				return s.push(ctx, ztoc, s.store)
+			}
+			return nil
+		})
+	}
+	return eg.Wait()
 }
 
 func (s *sociIndexer) layer(ctx context.Context, layer ocispecs.Descriptor, provider content.Provider) (ocispecs.Descriptor, error) {
@@ -90,27 +104,26 @@ func (s *sociIndexer) layer(ctx context.Context, layer ocispecs.Descriptor, prov
 			return out, err
 		}
 		defer ra.Close()
-		input, err := os.Create(filepath.Join(dir, "layer.gz"))
-		if err != nil {
-			return out, err
+		// containerd's local content reader exposes the file through a LimitedReader.
+		// Inherit that descriptor instead of copying the whole layer for the helper.
+		reader, ok := content.NewReader(ra).(*io.LimitedReader)
+		if !ok {
+			return out, errors.New("SOCI indexing requires a local file-backed content store")
 		}
-		n, copyErr := io.Copy(input, io.NewSectionReader(ra, 0, ra.Size()))
-		closeErr := input.Close()
-		if copyErr != nil {
-			return out, copyErr
+		input, ok := reader.R.(*os.File)
+		if !ok {
+			return out, errors.New("SOCI indexing requires a local file-backed content store")
 		}
-		if closeErr != nil {
-			return out, closeErr
-		}
-		if n != layer.Size {
-			return out, errors.Errorf("SOCI layer size mismatch: got %d, want %d", n, layer.Size)
+		if ra.Size() != layer.Size {
+			return out, errors.Errorf("SOCI layer size mismatch: got %d, want %d", ra.Size(), layer.Size)
 		}
 		output, err := os.Create(filepath.Join(dir, "ztoc"))
 		if err != nil {
 			return out, err
 		}
 		defer output.Close()
-		cmd := exec.CommandContext(ctx, s.helper, input.Name())
+		cmd := exec.CommandContext(ctx, s.helper, "/proc/self/fd/3")
+		cmd.ExtraFiles = []*os.File{input}
 		cmd.Stdout = output
 		var stderr bytes.Buffer
 		cmd.Stderr = &stderr
